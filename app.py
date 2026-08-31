@@ -534,6 +534,12 @@ if simulate:
 
     results_mode_a = []
 
+    # Points where the equilibrium solver failed to converge.
+    # Both branches below use the SAME neutral fallback so that
+    # a solver failure is treated identically regardless of
+    # which mode produced it (see fix note below).
+    failed_points_a = []
+
 
     for ph in ph_range:
 
@@ -579,7 +585,19 @@ if simulate:
 
         except Exception:
 
-            solved_free_ligand = 0.0
+            # FIX: previously this branch silently assumed
+            # solved_free_ligand = 0.0 (i.e. "no active ligand",
+            # which downstream forces 0% precipitation for every
+            # metal at this pH). Mode B's except branch assumed
+            # the opposite extreme (all ligand still free). Both
+            # were guesses in opposite directions for the same
+            # kind of failure. We now use NaN so the failure
+            # propagates as a visible gap instead of a fabricated
+            # number, and flag the point.
+
+            solved_free_ligand = np.nan
+
+            failed_points_a.append(ph)
 
 
         final_active_ligand = (
@@ -591,6 +609,21 @@ if simulate:
         data_row = {
             "pH": ph
         }
+
+
+        if np.isnan(final_active_ligand):
+
+            # Solver failed at this pH: leave every metal as NaN
+            # so matplotlib shows a gap rather than a guessed
+            # value (same treatment as Mode B, see below).
+
+            for metal in selected_metals:
+
+                data_row[metal["name"]] = np.nan
+
+            results_mode_a.append(data_row)
+
+            continue
 
 
         for metal in selected_metals:
@@ -687,6 +720,10 @@ if simulate:
 
     results_mode_b = []
 
+    # Points where the equilibrium solver failed to converge
+    # (same neutral fallback convention as Mode A above).
+    failed_points_b = []
+
 
     alpha_A_fixed = calculate_alpha_precipitant(
         fixed_ph_value,
@@ -728,7 +765,16 @@ if simulate:
 
         except Exception:
 
-            solved_free_ligand = total_conc
+            # FIX: previously this branch silently assumed
+            # solved_free_ligand = total_conc (i.e. "all added
+            # ligand still free"), the opposite extreme from
+            # Mode A's old fallback. Now uses the same NaN
+            # convention as Mode A: the failure becomes a
+            # visible gap instead of a guessed number.
+
+            solved_free_ligand = np.nan
+
+            failed_points_b.append(total_conc)
 
 
         final_active_ligand = (
@@ -743,6 +789,17 @@ if simulate:
         data_row = {
             "added_concentration": total_conc
         }
+
+
+        if np.isnan(final_active_ligand):
+
+            for metal in selected_metals:
+
+                data_row[metal["name"]] = np.nan
+
+            results_mode_b.append(data_row)
+
+            continue
 
 
         for metal in selected_metals:
@@ -823,6 +880,21 @@ if simulate:
     df_mode_b = pd.DataFrame(
         results_mode_b
     )
+
+
+    # ========================================================
+    # SOLVER FAILURE WARNING
+    # ========================================================
+
+    if failed_points_a or failed_points_b:
+
+        st.warning(
+            f"The equilibrium solver failed to converge at "
+            f"{len(failed_points_a)} point(s) in Plot 1 and "
+            f"{len(failed_points_b)} point(s) in Plot 2. "
+            f"These points are shown as gaps in the curves "
+            f"rather than estimated values."
+        )
 
 
     # ========================================================
