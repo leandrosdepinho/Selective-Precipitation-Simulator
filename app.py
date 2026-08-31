@@ -487,6 +487,114 @@ def ligand_mass_balance_equation(
 
 
 # ============================================================
+# LOG-SPACE WRAPPER FOR THE ROOT SOLVER
+# ============================================================
+
+# FIX (numerical): the equilibrium root "total_free_ligand" can sit
+# anywhere from ~1e-1 M down to ~1e-20 M or lower, depending on how
+# insoluble the competing solids are. scipy's bisect was previously
+# called with a fixed ABSOLUTE tolerance (xtol=1e-15). That tolerance
+# is fine when the root is of order 1e-1, but once the true root is
+# several orders of magnitude below 1e-15 itself, bisect has no
+# resolution left to distinguish it from numerical noise — it just
+# stops as soon as the bracket shrinks below 1e-15, and the value
+# reported inside that final bracket is essentially arbitrary.
+#
+# That noise gets amplified by the (1 / active_ligand ** y) term in
+# the precipitation equation: for high-order stoichiometries (e.g.
+# y=4 for U4+/Th4+ with phosphate), a ~15% relative error in the
+# free-ligand concentration turns into a ~1.75x error in the computed
+# equilibrium metal concentration (1.15**4 ≈ 1.75). Right at the
+# transition pH/dosage — where a metal is neither fully dissolved nor
+# fully precipitated — that's enough to make % precipitated jump
+# erratically point to point (the pH 5-7.5 zig-zag).
+#
+# Fix: solve for log10(total_free_ligand) instead of the raw
+# concentration. Bisecting in log-space gives a uniform RELATIVE
+# resolution across every scale, so the same xtol behaves just as
+# well whether the true root is 1e-1 or 1e-20 — the mismatch between
+# solver tolerance and the ligand's concentration scale disappears.
+
+LOG_FREE_LIGAND_FLOOR = -300.0  # log10 of an effectively-zero free ligand concentration
+LOG_SOLVER_XTOL = 1e-12         # resolution in log10 units (i.e. ~1e-12 relative precision)
+
+
+def ligand_mass_balance_equation_log(
+    log_total_free_ligand,
+    total_added_ligand,
+    alpha_fraction,
+    metal_systems
+):
+    """
+    Same residual as ligand_mass_balance_equation, but parameterized
+    by log10(total_free_ligand) so the root finder operates with
+    uniform relative resolution regardless of the concentration scale.
+    """
+
+    total_free_ligand = 10 ** log_total_free_ligand
+
+    return ligand_mass_balance_equation(
+        total_free_ligand,
+        total_added_ligand,
+        alpha_fraction,
+        metal_systems
+    )
+
+
+def solve_free_ligand(total_added_ligand, alpha_fraction, metal_systems):
+    """
+    Solves the ligand mass balance for total_free_ligand, bisecting
+    in log10-space (see note above). Returns np.nan if the solver
+    fails to bracket/converge, so failures are visible as gaps in
+    the plots instead of being silently guessed in either direction.
+    """
+
+    if total_added_ligand <= 0:
+        return 0.0
+
+    # Quick check: is there enough ligand that nothing needs to
+    # dissolve at all (residual already >= 0 at zero free ligand)?
+    if ligand_mass_balance_equation(
+        0,
+        total_added_ligand,
+        alpha_fraction,
+        metal_systems
+    ) > 0:
+        return 0.0
+
+    try:
+
+        upper_bound = total_added_ligand + 0.1
+
+        log_solution = bisect(
+
+            ligand_mass_balance_equation_log,
+
+            LOG_FREE_LIGAND_FLOOR,
+
+            np.log10(upper_bound),
+
+            args=(
+                total_added_ligand,
+                alpha_fraction,
+                metal_systems
+            ),
+
+            xtol=LOG_SOLVER_XTOL
+
+        )
+
+        return 10 ** log_solution
+
+    except Exception:
+
+        # Solver failed to bracket/converge: report as NaN rather
+        # than guessing a neutral fallback. Downstream code turns
+        # this into a visible gap in the curves (see below).
+        return np.nan
+
+
+# ============================================================
 # RUN SIMULATION
 # ============================================================
 
@@ -535,9 +643,9 @@ if simulate:
     results_mode_a = []
 
     # Points where the equilibrium solver failed to converge.
-    # Both branches below use the SAME neutral fallback so that
-    # a solver failure is treated identically regardless of
-    # which mode produced it (see fix note below).
+    # Both modes use the SAME neutral (NaN) fallback so that a
+    # solver failure is treated identically regardless of which
+    # mode produced it.
     failed_points_a = []
 
 
@@ -551,52 +659,13 @@ if simulate:
             ]
         )
 
+        solved_free_ligand = solve_free_ligand(
+            fixed_precipitant_conc,
+            alpha_A,
+            selected_metals
+        )
 
-        try:
-
-            if ligand_mass_balance_equation(
-                0,
-                fixed_precipitant_conc,
-                alpha_A,
-                selected_metals
-            ) > 0:
-
-                solved_free_ligand = 0.0
-
-            else:
-
-                solved_free_ligand = bisect(
-
-                    ligand_mass_balance_equation,
-
-                    0,
-
-                    fixed_precipitant_conc + 0.1,
-
-                    args=(
-                        fixed_precipitant_conc,
-                        alpha_A,
-                        selected_metals
-                    ),
-
-                    xtol=1e-15
-
-                )
-
-        except Exception:
-
-            # FIX: previously this branch silently assumed
-            # solved_free_ligand = 0.0 (i.e. "no active ligand",
-            # which downstream forces 0% precipitation for every
-            # metal at this pH). Mode B's except branch assumed
-            # the opposite extreme (all ligand still free). Both
-            # were guesses in opposite directions for the same
-            # kind of failure. We now use NaN so the failure
-            # propagates as a visible gap instead of a fabricated
-            # number, and flag the point.
-
-            solved_free_ligand = np.nan
-
+        if np.isnan(solved_free_ligand):
             failed_points_a.append(ph)
 
 
@@ -736,44 +805,13 @@ if simulate:
 
     for total_conc in concentration_range:
 
-        try:
+        solved_free_ligand = solve_free_ligand(
+            total_conc,
+            alpha_A_fixed,
+            selected_metals
+        )
 
-            if total_conc > 0:
-
-                solved_free_ligand = bisect(
-
-                    ligand_mass_balance_equation,
-
-                    0,
-
-                    total_conc + 0.1,
-
-                    args=(
-                        total_conc,
-                        alpha_A_fixed,
-                        selected_metals
-                    ),
-
-                    xtol=1e-15
-
-                )
-
-            else:
-
-                solved_free_ligand = 0.0
-
-
-        except Exception:
-
-            # FIX: previously this branch silently assumed
-            # solved_free_ligand = total_conc (i.e. "all added
-            # ligand still free"), the opposite extreme from
-            # Mode A's old fallback. Now uses the same NaN
-            # convention as Mode A: the failure becomes a
-            # visible gap instead of a guessed number.
-
-            solved_free_ligand = np.nan
-
+        if np.isnan(solved_free_ligand):
             failed_points_b.append(total_conc)
 
 
