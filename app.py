@@ -490,31 +490,6 @@ def ligand_mass_balance_equation(
 # LOG-SPACE WRAPPER FOR THE ROOT SOLVER
 # ============================================================
 
-# FIX (numerical): the equilibrium root "total_free_ligand" can sit
-# anywhere from ~1e-1 M down to ~1e-20 M or lower, depending on how
-# insoluble the competing solids are. scipy's bisect was previously
-# called with a fixed ABSOLUTE tolerance (xtol=1e-15). That tolerance
-# is fine when the root is of order 1e-1, but once the true root is
-# several orders of magnitude below 1e-15 itself, bisect has no
-# resolution left to distinguish it from numerical noise — it just
-# stops as soon as the bracket shrinks below 1e-15, and the value
-# reported inside that final bracket is essentially arbitrary.
-#
-# That noise gets amplified by the (1 / active_ligand ** y) term in
-# the precipitation equation: for high-order stoichiometries (e.g.
-# y=4 for U4+/Th4+ with phosphate), a ~15% relative error in the
-# free-ligand concentration turns into a ~1.75x error in the computed
-# equilibrium metal concentration (1.15**4 ≈ 1.75). Right at the
-# transition pH/dosage — where a metal is neither fully dissolved nor
-# fully precipitated — that's enough to make % precipitated jump
-# erratically point to point (the pH 5-7.5 zig-zag).
-#
-# Fix: solve for log10(total_free_ligand) instead of the raw
-# concentration. Bisecting in log-space gives a uniform RELATIVE
-# resolution across every scale, so the same xtol behaves just as
-# well whether the true root is 1e-1 or 1e-20 — the mismatch between
-# solver tolerance and the ligand's concentration scale disappears.
-
 LOG_FREE_LIGAND_FLOOR = -300.0  # log10 of an effectively-zero free ligand concentration
 LOG_SOLVER_XTOL = 1e-12         # resolution in log10 units (i.e. ~1e-12 relative precision)
 
@@ -525,11 +500,6 @@ def ligand_mass_balance_equation_log(
     alpha_fraction,
     metal_systems
 ):
-    """
-    Same residual as ligand_mass_balance_equation, but parameterized
-    by log10(total_free_ligand) so the root finder operates with
-    uniform relative resolution regardless of the concentration scale.
-    """
 
     total_free_ligand = 10 ** log_total_free_ligand
 
@@ -542,12 +512,6 @@ def ligand_mass_balance_equation_log(
 
 
 def solve_free_ligand(total_added_ligand, alpha_fraction, metal_systems):
-    """
-    Solves the ligand mass balance for total_free_ligand, bisecting
-    in log10-space (see note above). Returns np.nan if the solver
-    fails to bracket/converge, so failures are visible as gaps in
-    the plots instead of being silently guessed in either direction.
-    """
 
     if total_added_ligand <= 0:
         return 0.0
@@ -588,9 +552,6 @@ def solve_free_ligand(total_added_ligand, alpha_fraction, metal_systems):
 
     except Exception:
 
-        # Solver failed to bracket/converge: report as NaN rather
-        # than guessing a neutral fallback. Downstream code turns
-        # this into a visible gap in the curves (see below).
         return np.nan
 
 
