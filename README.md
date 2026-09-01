@@ -1,1 +1,1 @@
-# Selective-Precipitation-Simulator
+# Selective_precipitation_simulator
